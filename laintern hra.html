@@ -1,0 +1,885 @@
+<!DOCTYPE html>
+<html lang="sk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Pajkov a Pajkin dobrodružný beh 3</title>
+<style>
+  :root{ --night:#1d2b3a; --paper:#fdf6e3; --ink:#2a2118; --dirt:#8a5a2b; }
+  *{box-sizing:border-box; margin:0; padding:0; -webkit-tap-highlight-color:transparent;}
+  html,body{height:100%;}
+  body{
+    background:var(--night);
+    font-family:"Courier New", Courier, monospace;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    color:var(--paper); overflow:hidden; touch-action:manipulation;
+  }
+  #wrap{ width:min(96vw, 900px); position:relative; }
+  canvas{
+    display:block; width:100%; height:auto;
+    image-rendering:pixelated;
+    border:6px solid var(--ink);
+    box-shadow:0 0 0 4px var(--dirt), 0 14px 40px rgba(0,0,0,.6);
+    border-radius:4px;
+  }
+  .pix{ font-weight:900; letter-spacing:2px; text-transform:uppercase;
+        text-shadow:3px 3px 0 rgba(0,0,0,.55); }
+  #hint{ margin-top:10px; text-align:center; font-size:13px; opacity:.85; }
+  @media (max-width:600px){ #hint{font-size:11px;} }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="c" width="900" height="500" aria-label="Laintern hra"></canvas>
+  <div id="hint" class="pix">SKOK: medzerník / ťuk vpravo &nbsp;·&nbsp; STREĽBA: X / ťuk vľavo</div>
+</div>
+
+<script>
+(() => {
+"use strict";
+const cv = document.getElementById("c");
+const cx = cv.getContext("2d");
+const W = cv.width, H = cv.height;
+const GROUND = H - 80;
+
+// ---------- helpers ----------
+const R = (a,b)=>a+Math.random()*(b-a);
+const RI = (a,b)=>Math.floor(R(a,b+1));
+const pick = a => a[RI(0,a.length-1)];
+function px(x,y,w,h,col){ cx.fillStyle=col; cx.fillRect(Math.round(x),Math.round(y),w,h); }
+function text(t,x,y,size,col,align="center"){
+  cx.font = "900 "+size+"px 'Courier New', monospace";
+  cx.textAlign = align;
+  cx.fillStyle = "rgba(0,0,0,.55)";
+  cx.fillText(t, x+3, y+3);
+  cx.fillStyle = col;
+  cx.fillText(t, x, y);
+}
+
+// ---------- detské "nadávky" ----------
+const CURSES = ["Do šišky!","Ty brďo!","Krucinál!","Do kelu!","Himbajs!",
+  "Fujtajbl!","Šmankote!","Do paroma!","Prepánajána!","Bodaj ťa hrach!",
+  "U psej matere!","Do gula!","Ajajáj!","Toto nie!","Grrr, ehm, pardon!"];
+const BOSS_TAUNTS = ["Ja sa nebojím!","Môj poklad!","Stoj, malý hrdina!","CHACHACHÁ!"];
+
+// ---------- levely / témy ----------
+const THEMES = [
+  { name:"SLNEČNÁ LÚKA",  sky:"#7ec8e3", sky2:"#a8dff0", ground:"#5cb14a", dirt:"#8a5a2b", speck:"#6f4720", sun:"#ffe14a", stars:false, lava:false },
+  { name:"ZLATÁ PÚŠŤ",    sky:"#f6a95c", sky2:"#f8c98a", ground:"#e0c068", dirt:"#c49a4a", speck:"#a67c2e", sun:"#ff7a29", stars:false, lava:false },
+  { name:"TEMNÝ LES",     sky:"#1a2340", sky2:"#2a3a60", ground:"#2e5a34", dirt:"#20361f", speck:"#152812", sun:"#e8e8ff", stars:true,  lava:false },
+  { name:"OHŇOVÁ ZEM",    sky:"#3a1010", sky2:"#5c1c14", ground:"#3c3c3c", dirt:"#262626", speck:"#ff5e1a", sun:"#ff3a1a", stars:true,  lava:true  },
+];
+const theme = ()=>THEMES[(g.level-1)%THEMES.length];
+
+// ---------- stav ----------
+const ST = { MENU:0, SELECT:1, PLAY:2, OVER:3, MINIGAME:4 };
+let state = ST.MENU;
+let hero = "Pajko";
+let best = 0;
+
+let g = null;
+function newGame(){
+  g = {
+    t:0, speed:5, dist:0, gems:0, hearts:3, inv:0, level:1, levelStart:0,
+    y:GROUND, vy:0, jumps:0,
+    flying:0, boost:0, superJump:0, shootCd:0, starPower:0,
+    obstacles:[], gemsArr:[], powerups:[], clouds:[], stars:[],
+    enemies:[], shots:[], eshots:[], floaters:[],
+    boss:null, miniDone:false, bossDone:false,
+    msg:"", msgT:0, shake:0, banner:"", bannerT:0,
+    nextObs:60, nextGem:40, nextPow:RI(400,700), nextEnemy:RI(300,500),
+  };
+  for(let i=0;i<5;i++) g.clouds.push({x:R(0,W), y:R(30,150), s:R(.3,.8), w:RI(40,90)});
+  for(let i=0;i<40;i++) g.stars.push({x:R(0,W), y:R(0,GROUND-60), b:R(.3,1)});
+}
+function say(m, frames=190){ g.msg = m; g.msgT = frames; }
+function floater(x,y,txt,col="#ffe14a"){ g.floaters.push({x,y,t:150,txt,col}); }
+function banner(t){ g.banner=t; g.bannerT=210; }
+
+// ---------- input ----------
+function jump(){
+  if(state===ST.MENU){ state=ST.SELECT; return; }
+  if(state===ST.OVER){ if(g && g.overT>0) return; state=ST.SELECT; return; }
+  if(state!==ST.PLAY) return;
+  if(g.flying>0){ g.vy = -7; return; }
+  if(g.jumps < 2){
+    const power = g.superJump>0 && g.jumps===0 ? -19 : -13;
+    if(g.superJump>0 && g.jumps===0){ g.superJump=0; say("KAMZÍK SKOK! 🐐"); }
+    g.vy = power; g.jumps++;
+  }
+}
+function shoot(){
+  if(state!==ST.PLAY) return;
+  if(g.shootCd>0) return;
+  g.shootCd = 18;
+  g.shots.push({x:170, y:g.y-30, vx:13});
+}
+window.addEventListener("keydown", e=>{
+  if(e.code==="Space"||e.code==="ArrowUp"){ e.preventDefault(); jump(); }
+  if(e.code==="KeyX"||e.code==="KeyF"||e.code==="ArrowRight"){ e.preventDefault(); shoot(); }
+  if(state===ST.MINIGAME && g.mini && g.mini.phase==="PICK"){
+    if(e.code==="Digit1"||e.code==="Numpad1") pickCup(0);
+    if(e.code==="Digit2"||e.code==="Numpad2") pickCup(1);
+    if(e.code==="Digit3"||e.code==="Numpad3") pickCup(2);
+  }
+});
+cv.addEventListener("pointerdown", e=>{
+  const r = cv.getBoundingClientRect();
+  const mx = (e.clientX-r.left)*(W/r.width);
+  const my = (e.clientY-r.top)*(H/r.height);
+  if(state===ST.SELECT){
+    if(my>180 && my<380){
+      hero = mx < W/2 ? "Pajko" : "Pajka";
+      newGame(); state=ST.PLAY; banner("LEVEL 1: "+theme().name);
+    }
+    return;
+  }
+  if(state===ST.MINIGAME && g.mini && g.mini.phase==="PICK"){
+    // zisti ktorý pohár klikol
+    const cups = g.mini.cupX;
+    for(let i=0;i<3;i++){
+      if(Math.abs(mx-cups[i])<70 && my>200 && my<420){ pickCup(i); return; }
+    }
+    return;
+  }
+  if(state===ST.PLAY){ if(mx < W/2) shoot(); else jump(); return; }
+  jump();
+});
+
+// ---------- sprity ----------
+function drawHero(x,y,frame,flying){
+  const skin="#f3c89a", shirt = hero==="Pajko" ? "#2e6fd0" : "#d0387f",
+        pants="#3b3b6e", hair = hero==="Pajko" ? "#5a3a1a" : "#e8b23a";
+  cx.save(); cx.translate(x,y);
+  const legA = flying?2:(Math.floor(frame/6)%2===0?4:0);
+  px(-8, -16, 6, 16 - legA, pants);
+  px(2,  -16, 6, 16 - (4-legA), pants);
+  px(-10,-36,20,20,shirt);
+  px(-16,-36,6,16,shirt); px(10,-36,6,16,shirt);
+  px(-16,-20,6,4,skin); px(10,-20,6,4,skin);
+  px(-10,-56,20,20,skin);
+  px(-10,-56,20,7,hair);
+  if(hero==="Pajka"){ px(-14,-56,4,14,hair); px(10,-56,4,14,hair); }
+  px(-6,-46,4,4,"#fff"); px(2,-46,4,4,"#fff");
+  px(-5,-45,2,2,"#1a1a1a"); px(3,-45,2,2,"#1a1a1a");
+  // prak / hviezdomet v ruke
+  px(14,-30,8,4,"#7a5a2b"); px(20,-34,4,8,"#7a5a2b");
+  cx.restore();
+}
+function drawSlug(o){
+  cx.save(); cx.translate(o.x, GROUND);
+  px(-24,-18,48,18,"#b8de53"); px(-24,-24,36,10,"#b8de53");
+  px(-6,-34,26,22,"#c98a4b"); px(0,-28,14,10,"#a86a2e");
+  px(-22,-34,4,12,"#b8de53"); px(-12,-38,4,16,"#b8de53");
+  px(-24,-40,8,8,"#fff"); px(-14,-44,8,8,"#fff");
+  px(-21,-37,3,3,"#000"); px(-11,-41,3,3,"#000");
+  px(-20,-12,10,3,"#5c7a1e");
+  cx.restore();
+}
+function drawFireball(o){
+  cx.save(); cx.translate(o.x,o.y);
+  px(-10,-8,20,16,"#ff9d2e"); px(-6,-4,12,8,"#ffd84a"); px(-16,-4,6,8,"#ff5e1a");
+  cx.restore();
+}
+function drawRock(o){
+  cx.save(); cx.translate(o.x,o.y);
+  px(-9,-9,18,18,"#8a8a8a"); px(-5,-5,8,8,"#6a6a6a");
+  cx.restore();
+}
+function drawWC(x,y,t){
+  cx.save(); cx.translate(x, y + Math.sin(t/8)*4);
+  px(-16,-8,32,16,"#f2f2f2"); px(-12,-16,24,8,"#ffffff");
+  px(-20,-20,40,6,"#dcdcdc");
+  const flap = Math.floor(t/5)%2===0?-6:0;
+  px(-30,-14+flap,10,6,"#fff"); px(20,-14+flap,10,6,"#fff");
+  px(-4,2,8,8,"#bfe6ff");
+  cx.restore();
+}
+function drawFlameguy(x,y,t){
+  cx.save(); cx.translate(x,y);
+  const f = Math.floor(t/4)%2===0?4:0;
+  px(-12,-28-f,24,28+f,"#ff6a1a"); px(-8,-20-f,16,20+f,"#ffc23a");
+  px(-6,-16,4,4,"#1a1a1a"); px(2,-16,4,4,"#1a1a1a"); px(-4,-8,8,2,"#1a1a1a");
+  cx.restore();
+}
+function drawKamzik(x,y){
+  cx.save(); cx.translate(x,y);
+  px(-14,-24,28,16,"#c9b591"); px(6,-36,12,14,"#c9b591");
+  px(10,-42,3,8,"#4a3a26"); px(15,-44,3,10,"#4a3a26");
+  px(14,-32,2,2,"#000");
+  px(-12,-8,4,8,"#8a7350"); px(6,-8,4,8,"#8a7350");
+  cx.restore();
+}
+function drawTruhlica(x,y,t){
+  cx.save(); cx.translate(x,y);
+  // truhla z dreva so zlatým zámkom
+  px(-18,-30,36,22,"#8a5a2b"); // telo
+  px(-18,-40,36,12,"#a06830"); // veko
+  px(-20,-42,40,4,"#6a4a20"); // pás hore
+  px(-20,-20,40,4,"#6a4a20"); // pás dole
+  px(-4,-36,8,8,"#ffe14a"); // zámok
+  px(-2,-34,4,4,"#ffd84a");
+  // blikajúce iskričky
+  const s = Math.sin(t/8)*3;
+  px(-14+s,-46,4,4,"#ffe14a"); px(10-s,-44,3,3,"#fff");
+  cx.restore();
+}
+function drawHviezda(x,y,t){
+  cx.save(); cx.translate(x, y + Math.sin(t/7)*5);
+  // veľká žiarivá hviezda
+  const glow = Math.sin(t/5)*0.3 + 0.7;
+  cx.globalAlpha = glow;
+  // vonkajšia žiara
+  px(-16,-16,32,32,"rgba(255,225,74,.3)");
+  // kríž tvar hviezdy
+  px(-4,-18,8,36,"#ffe14a");
+  px(-18,-4,36,8,"#ffe14a");
+  // diagonály
+  px(-10,-10,8,8,"#ffe14a"); px(2,-10,8,8,"#ffe14a");
+  px(-10,2,8,8,"#ffe14a"); px(2,2,8,8,"#ffe14a");
+  // stred biely
+  px(-4,-4,8,8,"#fff");
+  cx.globalAlpha = 1;
+  cx.restore();
+}
+function drawGem(o){
+  cx.save(); cx.translate(o.x,o.y + Math.sin((g?g.t:0)/10 + o.x)*3);
+  px(-8,-6,16,8,"#39d3e6"); px(-4,2,8,6,"#1fa8ba"); px(-6,-4,4,3,"#c8f6ff");
+  cx.restore();
+}
+// --- nepriatelia ---
+function drawTienovec(e){ // vysoký tmavý teleportujúci
+  cx.save(); cx.translate(e.x, GROUND);
+  const tw = Math.floor(g.t/6)%2===0?2:-2;
+  px(-8,-90,16,60,"#141414");          // telo
+  px(-6,-104,12,14,"#141414");         // hlava
+  px(-6,-100,4,3,"#c85cff"); px(2,-100,4,3,"#c85cff"); // fialové oči
+  px(-14+tw,-86,4,50,"#141414"); px(10-tw,-86,4,50,"#141414"); // dlhé ruky
+  px(-6,-30,4,30,"#141414"); px(2,-30,4,30,"#141414");         // nohy
+  // fialové iskričky (pomalé blikanie, bez trasenia)
+  for(let i=0;i<3;i++){
+    const sx = Math.sin((g.t/20)+i*2.1)*18;
+    const sy = -30 - ((g.t/3 + i*33) % 70);
+    px(sx, sy, 3,3,"rgba(200,92,255,.7)");
+  }
+  cx.restore();
+}
+function drawOrk(e){
+  cx.save(); cx.translate(e.x, GROUND);
+  px(-12,-40,24,24,"#5c8a3a");                 // telo
+  px(-10,-56,20,16,"#6ea344");                 // hlava
+  px(-12,-60,24,6,"#555");                     // prilba
+  px(-7,-50,4,4,"#ffdf3a"); px(3,-50,4,4,"#ffdf3a"); // oči
+  px(-6,-42,12,3,"#2e4a1a");                   // úškrn
+  px(-4,-40,2,4,"#fff"); px(2,-40,2,4,"#fff"); // zuby
+  px(-18,-38,6,14,"#5c8a3a"); px(12,-38,6,14,"#5c8a3a");
+  px(-8,-16,6,16,"#3a5c26"); px(2,-16,6,16,"#3a5c26");
+  px(16,-46,4,20,"#7a5a2b"); px(14,-50,8,6,"#9a9a9a"); // kyjak
+  cx.restore();
+}
+function drawTrol(e, scale=1){
+  cx.save(); cx.translate(e.x, GROUND); cx.scale(scale,scale);
+  const step = Math.floor(g.t/12)%2===0?2:0;
+  px(-24,-56,48,40,"#8a9a7a");                  // veľké telo
+  px(-16,-74,32,20,"#9aab88");                  // hlava
+  px(-10,-68,5,5,"#2a2a2a"); px(6,-68,5,5,"#2a2a2a");
+  px(-6,-58,14,3,"#5a6a4a");
+  px(-32,-52,8,26,"#8a9a7a"); px(24,-52,8,26,"#8a9a7a");
+  px(-16,-16+step,10,16,"#6a7a5a"); px(6,-16-step+2,10,16,"#6a7a5a");
+  px(30,-60,6,34,"#6a4a26"); px(26,-66,14,8,"#7a7a7a"); // veľký kyjak
+  cx.restore();
+}
+function drawDrak(b){
+  cx.save(); cx.translate(b.x, b.y);
+  const col = ["#c22e2e","#8a2ec2","#2e8ac2","#2ec25a"][(g.level-1)%4];
+  const dark = "#3a1a1a";
+  const flap = Math.floor(g.t/6)%2===0? -14 : 6;
+  // krídla
+  px(-10, -30+flap, 50, 12, col);
+  px(-10, 18-flap/2, 50, 12, col);
+  // telo
+  px(-40,-14,70,28,col);
+  px(-64,-8,26,14,col); // chvost
+  px(-72,-10,10,8,col);
+  // hlava (pozerá doľava k hrdinovi)
+  px(-58,-30,26,20,col);
+  px(-64,-24,8,8,col); // ňufák
+  px(-54,-26,5,5,"#ffdf3a"); // oko
+  px(-64,-18,10,3,dark);
+  // nozdry dym
+  px(-70,-28,4,4,"rgba(120,120,120,.6)");
+  // brucho
+  px(-36,2,60,8,"#e8c86a");
+  cx.restore();
+}
+function drawShot(s){
+  cx.save(); cx.translate(s.x,s.y);
+  const a = Math.floor(g.t/3)%2===0;
+  px(-6,-2,12,4,"#ffe14a"); px(-2,-6,4,12,"#ffe14a");
+  if(a){ px(-8,-8,3,3,"#fff"); px(5,5,3,3,"#fff"); }
+  cx.restore();
+}
+
+// ---------- svet ----------
+function drawWorld(){
+  const th = theme();
+  // obloha gradient (2 pásy)
+  px(0,0,W,H/2,th.sky); px(0,H/2,W,H/2,th.sky2);
+  if(th.stars) for(const s of g.stars) px(s.x,s.y,2,2,"rgba(255,255,255,"+s.b+")");
+  // slnko / mesiac
+  px(W-120,50,50,50,th.sun); px(W-110,60,30,30,"rgba(255,255,255,.35)");
+  for(const c of g.clouds){
+    const ccol = th.stars ? "rgba(200,200,230,.25)" : "#ffffff";
+    px(c.x,c.y,c.w,16,ccol); px(c.x+10,c.y-10,c.w-20,12,ccol);
+  }
+  px(0,GROUND,W,10,th.ground);
+  px(0,GROUND+10,W,H-GROUND-10,th.dirt);
+  cx.fillStyle = th.speck;
+  const off = Math.floor((g.t*g.speed)%40);
+  for(let x=-off; x<W; x+=40){
+    cx.fillRect(x+8, GROUND+24, 8,8);
+    cx.fillRect(x+26, GROUND+44, 8,8);
+  }
+  if(th.lava){ // bublajúca láva v pukline
+    for(let x=-off; x<W; x+=80)
+      px(x+40, GROUND+58 + (Math.floor(g.t/10+x)%2)*3, 12,6,"#ff7a1a");
+  }
+}
+
+// ---------- spawn ----------
+function levelDist(){ return g.dist - g.levelStart; }
+function spawn(){
+  const bossActive = !!g.boss;
+  // obtiažnosť rastie hustotou prekážok, nie rýchlosťou
+  const dif = Math.min(1 + (g.level-1)*0.3 + g.dist/4000, 3);
+  g.nextObs -= g.speed; g.nextGem -= g.speed; g.nextPow -= g.speed; g.nextEnemy -= g.speed;
+  if(g.nextObs<=0 && !bossActive){
+    if(Math.random()<0.7) g.obstacles.push({type:"slug", x:W+40, hp:1});
+    else g.obstacles.push({type:"fire", x:W+40, y: GROUND-RI(30,110)});
+    g.nextObs = Math.max(160, RI(300, 560) / dif);
+  }
+  if(g.nextGem<=0){
+    const baseY = GROUND - RI(30,160);
+    for(let i=0;i<RI(2,4);i++) g.gemsArr.push({x:W+40+i*34, y:baseY});
+    g.nextGem = RI(200,420);
+  }
+  if(g.nextPow<=0 && !bossActive){
+    const roll = Math.random();
+    let type, py;
+    if(roll<0.25) { type="wc"; py=GROUND-140; }
+    else if(roll<0.45) { type="flame"; py=GROUND; }
+    else if(roll<0.65) { type="kamzik"; py=GROUND; }
+    else if(roll<0.82) { type="truhlica"; py=GROUND; }
+    else { type="hviezda"; py=GROUND-RI(60,140); }
+    g.powerups.push({type, x:W+60, y:py});
+    g.nextPow = RI(800,1500);
+  }
+  if(g.nextEnemy<=0 && !bossActive){
+    const roll = Math.random();
+    let e;
+    if(roll<0.4) e = {type:"ork", x:W+50, hp:2, vx:1.2, tp:0};
+    else if(roll<0.75) e = {type:"tienovec", x:W+50, hp:1, vx:0.8, tp:RI(60,120)};
+    else e = {type:"trol", x:W+60, hp:3, vx:0.6, tp:0};
+    e.said = false;
+    g.enemies.push(e);
+    g.nextEnemy = Math.max(280, RI(520,900) / dif);
+  }
+  // miniboss a boss podľa vzdialenosti v leveli
+  if(!bossActive && !g.miniDone && levelDist() > 350){
+    g.boss = {kind:"mini", type:"obor", hp:6, maxHp:6, x:W-120, y:GROUND, t:0, shootT:90};
+    g.miniDone = true;
+    say("POZOR! Prichádza OBOR! 🪨"); floater(W-140, GROUND-160, pick(BOSS_TAUNTS), "#fff");
+  }
+  if(!g.boss && g.miniDone && !g.bossDone && levelDist() > 750){
+    const hp = 10 + g.level*3;
+    g.boss = {kind:"boss", type:"drak", hp, maxHp:hp, x:W-140, y:GROUND-180, t:0, shootT:70};
+    say("BOSS! Prilieta DRAK! 🐉"); floater(W-160, GROUND-260, pick(BOSS_TAUNTS), "#fff");
+  }
+}
+
+// ---------- update ----------
+function update(){
+  g.t++;
+  if(g.t%900===0) g.speed = Math.min(g.speed+0.3, 9);
+  const sp = g.speed + (g.boost>0?4:0);
+  g.dist += sp/10;
+  if(g.boost>0) g.boost--;
+  if(g.inv>0) g.inv--;
+  if(g.starPower>0) g.starPower--;
+  if(g.msgT>0) g.msgT--;
+  if(g.bannerT>0) g.bannerT--;
+  if(g.shake>0) g.shake--;
+  if(g.shootCd>0) g.shootCd--;
+
+  for(const c of g.clouds){ c.x -= c.s; if(c.x<-c.w){ c.x=W+RI(0,100); c.y=R(30,150);} }
+
+  // fyzika hrdinu
+  if(g.flying>0){
+    g.flying--; g.vy += 0.35; if(g.vy>4) g.vy=4;
+    g.y += g.vy;
+    if(g.y > GROUND) g.y = GROUND;
+    if(g.y < 90) g.y = 90;
+    if(g.flying===0) say("WC odletelo... 🚽");
+  } else {
+    g.vy += 0.8; g.y += g.vy;
+    if(g.y >= GROUND){ g.y = GROUND; g.vy = 0; g.jumps = 0; }
+  }
+
+  spawn();
+
+  const hx = 140, hy = g.y;
+  const hurt = (m)=>{
+    if(g.inv>0 || g.starPower>0) return;
+    g.hearts--; g.inv=80; g.shake=7; say(m);
+    if(g.hearts<=0){ best = Math.max(best, score()); g.overCurse=pick(CURSES); g.shake=0; state = ST.OVER; g.overT=130; }
+  };
+
+  // prekážky
+  for(const o of g.obstacles){ o.x -= sp * (o.type==="fire"?1.4:1); }
+  g.obstacles = g.obstacles.filter(o=>o.x>-80 && !o.dead);
+  for(const o of g.obstacles){
+    let hit=false;
+    if(o.type==="slug") hit = Math.abs(o.x-hx)<34 && (GROUND-hy)<40 && g.flying===0;
+    else hit = Math.abs(o.x-hx)<26 && Math.abs(o.y-(hy-28))<30;
+    if(hit){ hurt(o.type==="slug" ? "Slimák Hlupor ťa zdržal! 🐌" : "Au! Horúce! 🔥"); break; }
+  }
+
+  // nepriatelia
+  for(const e of g.enemies){
+    e.x -= sp*0.6 + e.vx;
+    if(e.type==="tienovec"){
+      e.tp--;
+      if(e.tp<=0 && e.x>250){ // teleport bližšie!
+        floater(e.x, GROUND-110, "✦ tp! ✦", "#c85cff");
+        e.x -= RI(60,140); e.tp = RI(70,130);
+      }
+    }
+    if(!e.said && e.x < W-80){ e.said=true; if(Math.random()<0.6) floater(e.x, GROUND-100, pick(CURSES)); }
+    const tall = e.type==="tienovec" ? 100 : (e.type==="trol"? 70 : 55);
+    if(Math.abs(e.x-hx)<30 && (GROUND-hy) < tall && g.flying===0) hurt("Chytil ťa "+(e.type==="ork"?"ORK":e.type==="trol"?"TROL":"TIEŇOVEC")+"!");
+  }
+  g.enemies = g.enemies.filter(e=>e.x>-80 && e.hp>0);
+
+  // strely hrdinu
+  for(const s of g.shots){ s.x += s.vx; }
+  g.shots = g.shots.filter(s=>{
+    if(s.x>W+20) return false;
+    for(const e of g.enemies){
+      const tall = e.type==="tienovec" ? 104 : (e.type==="trol"? 74 : 60);
+      if(Math.abs(s.x-e.x)<26 && s.y > GROUND-tall-10 && s.y < GROUND+5){
+        e.hp--;
+        floater(e.x, GROUND-tall-10, e.hp<=0 ? pick(CURSES) : "Au!", e.hp<=0?"#ffe14a":"#fff");
+        if(e.hp<=0) g.gems += 2;
+        return false;
+      }
+    }
+    for(const o of g.obstacles){
+      if(o.type==="slug" && Math.abs(s.x-o.x)<28 && s.y>GROUND-46){
+        o.dead = true; floater(o.x, GROUND-56, "Slimák: "+pick(CURSES)); g.gems++;
+        return false;
+      }
+      if(o.type==="fire" && Math.abs(s.x-o.x)<20 && Math.abs(s.y-o.y)<20){
+        o.x=-999; floater(s.x,s.y,"Pf!","#ffd84a"); return false;
+      }
+    }
+    if(g.boss){
+      const b=g.boss;
+      const by = b.kind==="boss" ? b.y : GROUND-70;
+      if(Math.abs(s.x-b.x)<50 && Math.abs(s.y-by)<60){
+        b.hp--; floater(b.x, by-70, b.hp>0 ? pick(CURSES) : "NIEEEE... "+pick(CURSES), "#ff9d2e");
+        if(b.hp<=0) killBoss();
+        return false;
+      }
+    }
+    return true;
+  });
+
+  // boss správanie
+  if(g.boss){
+    const b = g.boss; b.t++;
+    if(b.kind==="mini"){
+      // obor pochoduje pomaly doľava-doprava na pravej strane
+      b.x = W-120 + Math.sin(b.t/40)*40;
+      b.shootT--;
+      if(b.shootT<=0){ // hádže kamene oblúkom
+        g.eshots.push({x:b.x-20, y:GROUND-70, vx:-R(5,8), vy:-R(6,10), grav:true});
+        b.shootT = Math.max(50, 100 - g.level*8);
+        if(Math.random()<0.35) floater(b.x, GROUND-160, pick(BOSS_TAUNTS), "#fff");
+      }
+    } else {
+      // drak lieta hore-dole, pľuje oheň
+      b.y = GROUND-170 + Math.sin(b.t/30)*80;
+      b.shootT--;
+      if(b.shootT<=0){
+        g.eshots.push({x:b.x-60, y:b.y-10, vx:-(6+g.level), vy:R(-1,2), grav:false});
+        b.shootT = Math.max(35, 75 - g.level*6);
+        if(Math.random()<0.3) floater(b.x, b.y-70, pick(BOSS_TAUNTS), "#fff");
+      }
+    }
+  }
+
+  // strely nepriateľov (kamene / oheň)
+  for(const s of g.eshots){
+    s.x += s.vx; s.y += s.vy;
+    if(s.grav) s.vy += 0.35;
+  }
+  g.eshots = g.eshots.filter(s=>{
+    if(s.x<-30 || s.y>GROUND+10) return false;
+    if(Math.abs(s.x-hx)<24 && Math.abs(s.y-(hy-28))<32){
+      hurt(s.grav ? "Trafil ťa kameň! 🪨" : "Dračí oheň! 🐉"); return false;
+    }
+    return true;
+  });
+
+  // diamanty
+  for(const gm of g.gemsArr){ gm.x -= sp; }
+  g.gemsArr = g.gemsArr.filter(gm=>{
+    if(Math.abs(gm.x-hx)<26 && Math.abs(gm.y-(hy-28))<34){ g.gems++; return false; }
+    return gm.x>-30;
+  });
+
+  // powerupy
+  for(const p of g.powerups){ p.x -= sp; }
+  g.powerups = g.powerups.filter(p=>{
+    const py = p.y;
+    const grab = Math.abs(p.x-hx)<34 && Math.abs(py-(hy-(p.type==="wc"||p.type==="hviezda"?28:0)))<60;
+    if(grab){
+      if(p.type==="wc"){ g.flying = 300; g.vy=-6; say("LETIACE WC! Ťukaj a leť! 🚽✨"); }
+      else if(p.type==="flame"){ g.boost = 240; say("Flameguy: TURBO! 🔥"); }
+      else if(p.type==="kamzik"){ g.superJump = 1; say("Kamzík ti dal MEGA SKOK! 🐐"); }
+      else if(p.type==="truhlica"){
+        if(g.hearts<3){ g.hearts++; say("Truhlica: +❤ Život navyše!"); }
+        else { g.gems += 15; say("Truhlica: +15 💎 Plné životy!"); }
+        floater(p.x, py-60, "✨", "#ffe14a");
+      }
+      else if(p.type==="hviezda"){
+        g.starPower = 360; say("⭐ HVIEZDA! Si nezničiteľný!");
+      }
+      return false;
+    }
+    return p.x>-60;
+  });
+
+  // floatery (pomalé, čitateľné)
+  for(const f of g.floaters){ f.t--; f.y -= 0.25; f.x -= sp*0.12; }
+  g.floaters = g.floaters.filter(f=>f.t>0);
+}
+
+function killBoss(){
+  const b = g.boss;
+  g.boss = null;
+  if(b.kind==="mini"){
+    g.gems += 10; say("OBOR porazený! +10 💎");
+  } else {
+    g.bossDone = true;
+    g.gems += 25;
+    say("DRAK porazený! +25 💎");
+    // spusti minihru so Slimákom Hlupor
+    startMinigame();
+  }
+}
+
+function startMinigame(){
+  const ballPos = RI(0,2);
+  const numSwaps = Math.min(3 + g.level, 10);
+  // pre-generate swap sequence
+  const swaps = [];
+  for(let i=0;i<numSwaps;i++){
+    let a = RI(0,2), b2;
+    do { b2 = RI(0,2); } while(b2===a);
+    swaps.push([a, b2]);
+  }
+  g.mini = {
+    phase:"SHOW", // SHOW -> SHUFFLE -> PICK -> RESULT
+    t:0,
+    ballAt: ballPos,     // which cup (0,1,2) has ball
+    cupX: [220, 420, 620], // current x positions
+    targetX: [220, 420, 620],
+    swaps,
+    swapIdx: 0,
+    swapT: 0,
+    picked: -1,
+    won: false,
+    resultT: 0,
+  };
+  state = ST.MINIGAME;
+}
+
+function updateMinigame(){
+  const m = g.mini;
+  m.t++;
+
+  if(m.phase==="SHOW"){
+    // ukáž guľôčku 2 sekundy
+    if(m.t > 120) { m.phase="SHUFFLE"; m.t=0; m.swapT=0; }
+  }
+  else if(m.phase==="SHUFFLE"){
+    if(m.swapIdx >= m.swaps.length){
+      // finalize positions
+      const pos = [220,420,620];
+      for(let i=0;i<m.swaps.length;i++){
+        const [a,b] = m.swaps[i];
+        [pos[a],pos[b]] = [pos[b],pos[a]];
+      }
+      m.cupX = pos;
+      m.phase="PICK"; m.t=0; return;
+    }
+    m.swapT++;
+    const dur = Math.max(20, 38 - g.level*2);
+    const progress = Math.min(m.swapT / dur, 1);
+    const ease = progress < 0.5 ? 2*progress*progress : 1-2*(1-progress)*(1-progress);
+    // compute positions: replay all completed swaps from base, then lerp current
+    const pos = [220,420,620];
+    for(let i=0;i<m.swapIdx;i++){
+      const [a,b] = m.swaps[i];
+      [pos[a],pos[b]] = [pos[b],pos[a]];
+    }
+    const [ca,cb] = m.swaps[m.swapIdx];
+    const fromA = pos[ca], fromB = pos[cb];
+    m.cupX = [...pos];
+    m.cupX[ca] = fromA + (fromB - fromA)*ease;
+    m.cupX[cb] = fromB + (fromA - fromB)*ease;
+    if(m.swapT >= dur){
+      m.swapIdx++;
+      m.swapT = 0;
+    }
+  }
+  else if(m.phase==="RESULT"){
+    m.resultT++;
+    if(m.resultT > 160){ // ~2.7 seconds then advance level
+      g.level++;
+      g.levelStart = g.dist;
+      g.miniDone = false; g.bossDone = false;
+      g.hearts = Math.min(3, g.hearts+1);
+      g.speed = Math.min(g.speed+0.4, 9);
+      g.enemies=[]; g.eshots=[]; g.obstacles=[];
+      banner("LEVEL "+g.level+": "+theme().name);
+      state = ST.PLAY;
+    }
+  }
+}
+
+function getBallCupIndex(){
+  // trace ball through all completed swaps
+  let pos = g.mini.ballAt;
+  const limit = g.mini.phase==="SHUFFLE" ? g.mini.swapIdx : g.mini.swaps.length;
+  for(let i=0; i<limit; i++){
+    const [a,b] = g.mini.swaps[i];
+    if(pos===a) pos=b;
+    else if(pos===b) pos=a;
+  }
+  return pos;
+}
+
+function getFinalCupPositions(){
+  const pos = [220,420,620];
+  for(let i=0;i<g.mini.swaps.length;i++){
+    const [a,b] = g.mini.swaps[i];
+    [pos[a],pos[b]] = [pos[b],pos[a]];
+  }
+  return pos;
+}
+
+function pickCup(idx){
+  const m = g.mini;
+  if(m.phase!=="PICK") return;
+  m.picked = idx;
+  const ballCup = getBallCupIndex();
+  m.won = (idx === ballCup);
+  if(m.won){
+    g.gems += 20;
+  } else {
+    g.gems = Math.max(0, g.gems - 10);
+  }
+  m.phase = "RESULT";
+  m.resultT = 0;
+  // snap cups to final positions for reveal
+  m.cupX = getFinalCupPositions();
+}
+
+function score(){ return Math.floor(g.dist) + g.gems*10 + (g.level-1)*100; }
+
+// ---------- render ----------
+function render(){
+  cx.save();
+  if(g && g.shake>0 && state===ST.PLAY) cx.translate(RI(-2,2), RI(-2,2));
+
+  if(state===ST.MENU){
+    px(0,0,W,H,"#7ec8e3");
+    px(0,GROUND,W,10,"#5cb14a"); px(0,GROUND+10,W,H-GROUND-10,"#8a5a2b");
+    drawHero(150,GROUND,0,false);
+    drawWC(W-180, 160, performance.now()/16);
+    drawSlug({x:W-350});
+    drawOrk({x:W-500});
+    text("PAJKOV A PAJKIN", W/2, 130, 38, "#ffe14a");
+    text("DOBRODRUŽNÝ BEH 3", W/2, 180, 34, "#fff");
+    text("Ťukni alebo stlač MEDZERNÍK", W/2, 310, 22, "#fff");
+    text("Hru rozprával ocko. Naprogramoval Claude Fable. ❤", W/2, H-24, 14, "#fdf6e3");
+    cx.restore(); return;
+  }
+
+  if(state===ST.SELECT){
+    px(0,0,W,H,"#1d2b3a");
+    text("KTO BEŽÍ?", W/2, 110, 44, "#ffe14a");
+    px(70,160,W/2-110,240,"#27405c");
+    px(W/2+40,160,W/2-110,240,"#4c2740");
+    const t = performance.now()/16;
+    let keep = hero;
+    cx.save(); cx.translate(0, Math.sin(t/10)*4);
+    hero="Pajko"; drawHero(70+(W/2-110)/2, 350, t, false);
+    cx.restore();
+    cx.save(); cx.translate(0, Math.cos(t/10)*4);
+    hero="Pajka"; drawHero(W/2+40+(W/2-110)/2, 350, t, false);
+    cx.restore();
+    hero = keep;
+    text("PAJKO", 70+(W/2-110)/2, 200, 30, "#9ec8ff");
+    text("PAJKA", W/2+40+(W/2-110)/2, 200, 30, "#ff9ecb");
+    text("Ťukni na postavičku", W/2, 450, 20, "#fff");
+    cx.restore(); return;
+  }
+
+  drawWorld();
+
+  for(const gm of g.gemsArr) drawGem(gm);
+  for(const p of g.powerups){
+    if(p.type==="wc") drawWC(p.x,p.y,g.t);
+    else if(p.type==="flame") drawFlameguy(p.x, GROUND, g.t);
+    else if(p.type==="kamzik") drawKamzik(p.x, GROUND);
+    else if(p.type==="truhlica") drawTruhlica(p.x, GROUND, g.t);
+    else if(p.type==="hviezda") drawHviezda(p.x, p.y, g.t);
+  }
+  for(const o of g.obstacles){
+    if(o.type==="slug") drawSlug(o); else drawFireball(o);
+  }
+  for(const e of g.enemies){
+    if(e.type==="ork") drawOrk(e);
+    else if(e.type==="trol") drawTrol(e);
+    else drawTienovec(e);
+  }
+  if(g.boss){
+    if(g.boss.kind==="mini") drawTrol(g.boss, 1.8);
+    else drawDrak(g.boss);
+    // HP bar
+    const b=g.boss, bw=280;
+    px(W/2-bw/2, 60, bw, 16, "rgba(0,0,0,.5)");
+    px(W/2-bw/2+2, 62, (bw-4)*(b.hp/b.maxHp), 12, b.kind==="mini"?"#9aab88":"#ff5e1a");
+    text(b.kind==="mini"?"OBOR":"DRAK  Lv."+g.level, W/2, 52, 18, "#fff");
+  }
+  for(const s of g.eshots){ if(s.grav) drawRock(s); else drawFireball(s); }
+  for(const s of g.shots) drawShot(s);
+
+  if(g.inv===0 || Math.floor(g.t/4)%2===0){
+    if(g.starPower>0){
+      // zlatá žiara okolo hrdinu
+      const pulse = Math.sin(g.t/4)*6;
+      cx.fillStyle="rgba(255,225,74,"+(0.25+Math.sin(g.t/6)*0.1)+")";
+      cx.fillRect(120-pulse, g.y-70-pulse, 40+pulse*2, 80+pulse*2);
+    }
+    if(g.boost>0){ px(100,g.y-40,30,20,"rgba(255,160,40,.5)"); }
+    if(g.flying>0){ drawWC(140, g.y-8, g.t); drawHero(140, g.y-14, g.t, true); }
+    else drawHero(140, g.y, g.t, false);
+  }
+
+  for(const f of g.floaters) text(f.txt, f.x, f.y, 20, f.col);
+
+  // HUD
+  for(let i=0;i<3;i++){
+    const col = i<g.hearts ? "#e63946" : "rgba(0,0,0,.25)";
+    px(20+i*34, 18, 10,10,col); px(34+i*34, 18, 10,10,col);
+    px(20+i*34, 26, 24,10,col); px(26+i*34, 36, 12,6,col);
+  }
+  drawGem({x:150,y:30}); text("×"+g.gems, 190, 40, 26, "#fff","left");
+  text(Math.floor(g.dist)+" m", W-24, 40, 26, "#fff","right");
+  text("LEVEL "+g.level, W-24, 70, 18, "#ffe14a","right");
+  if(g.superJump>0) text("🐐 MEGA SKOK pripravený", W/2, 100, 16, "#fff");
+  if(g.flying>0) text("WC LET: "+Math.ceil(g.flying/60)+"s", W/2, 124, 18, "#e0f7ff");
+  if(g.starPower>0) text("⭐ HVIEZDA: "+Math.ceil(g.starPower/60)+"s", W/2, 148, 18, "#ffe14a");
+
+  if(g.msgT>0) text(g.msg, W/2, 150, 24, "#ffe14a");
+  if(g.bannerT>0){
+    cx.fillStyle="rgba(0,0,0,.35)"; cx.fillRect(0,H/2-50,W,90);
+    text(g.banner, W/2, H/2+8, 40, "#ffe14a");
+  }
+
+  if(state===ST.MINIGAME && g.mini){
+    px(0,0,W,H,"#1d2b3a");
+    // Slimák Hlupor hore
+    cx.save(); cx.translate(W/2, 90);
+    cx.scale(1.5,1.5);
+    px(-24,-18,48,18,"#b8de53"); px(-24,-24,36,10,"#b8de53");
+    px(-6,-34,26,22,"#c98a4b"); px(0,-28,14,10,"#a86a2e");
+    px(-22,-34,4,12,"#b8de53"); px(-12,-38,4,16,"#b8de53");
+    px(-24,-40,8,8,"#fff"); px(-14,-44,8,8,"#fff");
+    px(-21,-37,3,3,"#000"); px(-11,-41,3,3,"#000");
+    px(-20,-12,10,3,"#5c7a1e");
+    cx.restore();
+    text("SLIMÁK HLUPOR", W/2, 42, 28, "#b8de53");
+    const m = g.mini;
+    const cupY = 320;
+    const ballCupNow = getBallCupIndex();
+    const showBall = m.phase==="SHOW" || m.phase==="RESULT";
+    // guľôčka
+    if(showBall){
+      const showIdx = m.phase==="SHOW" ? m.ballAt : ballCupNow;
+      const bx = m.cupX[showIdx];
+      px(bx-8, cupY+20, 16, 16, "#ff5e5e");
+      px(bx-4, cupY+24, 6, 4, "#ff9a9a");
+    }
+    // stôl
+    px(100, cupY+42, W-200, 8, "#6a4a20");
+    // poháre
+    for(let i=0;i<3;i++){
+      const cpx = m.cupX[i];
+      const isRevealed = showBall && ((m.phase==="SHOW" && i===m.ballAt) || (m.phase==="RESULT" && i===ballCupNow));
+      const ly = isRevealed ? -40 : 0;
+      px(cpx-30, cupY-60+ly, 60, 12, "#c98a4b");
+      px(cpx-24, cupY-48+ly, 48, 48, "#a06830");
+      px(cpx-28, cupY-2+ly, 56, 6, "#8a5a2b");
+      text(""+(i+1), cpx, cupY+70, 22, "#fff");
+      if(m.phase==="RESULT" && m.picked===i){
+        const isRight = i===ballCupNow;
+        cx.fillStyle = isRight ? "rgba(92,177,74,.3)" : "rgba(230,57,70,.3)";
+        cx.fillRect(cpx-34, cupY-66+ly, 68, 76);
+      }
+    }
+    if(m.phase==="SHOW") text("Pozri kde je guľôčka!", W/2, 190, 24, "#ffe14a");
+    if(m.phase==="SHUFFLE") text("Slimák mieša... 🐌", W/2, 190, 24, "#ffe14a");
+    if(m.phase==="PICK") text("Pod ktorým pohárom je? Ťukni! (1, 2, 3)", W/2, 190, 22, "#fff");
+    if(m.phase==="RESULT"){
+      if(m.won){
+        text("SPRÁVNE! +20 💎", W/2, 180, 30, "#5cb14a");
+        text("Slimák: Do šišky, uhádol to!", W/2, 220, 20, "#b8de53");
+      } else {
+        text("Slimák Hlupor ťa zase oklamal! -10 💎", W/2, 180, 24, "#e63946");
+        text("Slimák: Hehehe! Som šikovnejší!", W/2, 220, 20, "#b8de53");
+      }
+      text("Ďalší level za chvíľu...", W/2, 445, 18, "#fff");
+    }
+    cx.restore(); return;
+  }
+
+  if(state===ST.OVER){
+    cx.fillStyle="rgba(0,0,0,.55)"; cx.fillRect(0,0,W,H);
+    text("KONIEC HRY", W/2, 160, 52, "#ff9d2e");
+    text("Skóre: "+score(), W/2, 230, 34, "#fff");
+    text("Level "+g.level+"   Diamanty: "+g.gems+"   Beh: "+Math.floor(g.dist)+" m", W/2, 275, 20, "#c8f6ff");
+    text("Rekord: "+best, W/2, 320, 24, "#ffe14a");
+    text((g.overCurse||"")+(g.overT>0?" Počkaj..." : " Ťukni a hraj znova!"), W/2, 395, 24, "#fff");
+  }
+  cx.restore();
+}
+
+// ---------- loop ----------
+function loop(){
+  if(state===ST.PLAY) update();
+  if(state===ST.MINIGAME) updateMinigame();
+  if(state===ST.OVER && g && g.overT>0) g.overT--;
+  render();
+  requestAnimationFrame(loop);
+}
+newGame();
+loop();
+})();
+</script>
+</body>
+</html>
